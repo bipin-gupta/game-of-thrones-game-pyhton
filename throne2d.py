@@ -15,8 +15,13 @@ RUN:    python throne2d.py
 """
 
 import sys
-import random
 import pygame
+
+from got.core import (
+    new_regions, houses_alive, regions_of, is_border, owner_house,
+    resolve_battle, ai_house_turn, throne_target, check_end,
+)
+from got.houses import make_houses, NEUTRAL_COLOR
 
 # ---------------------------------------------------------------------------
 # 1. LOOK & FEEL
@@ -26,15 +31,10 @@ WIDTH, HEIGHT = 1000, 720
 MAP_W = 640                      # the map fills the left side; panel on the right
 FPS = 30
 
-# each house has a banner colour
-HOUSE_COLORS = {
-    "Stark":     (170, 175, 185),
-    "Lannister": (200, 40, 45),
-    "Baratheon": (235, 200, 55),
-    "Targaryen": (35, 35, 40),
-    "Tyrell":    (55, 160, 70),
-    None:        (95, 100, 120),   # neutral, unclaimed land
-}
+# the five great houses (name -> House); each House carries its banner colour.
+# A territory names its owner; owner_house(region, HOUSES) resolves it to the House.
+HOUSES = make_houses()
+
 BG        = (26, 30, 42)
 PANEL_BG  = (18, 21, 30)
 ROAD      = (70, 78, 96)
@@ -43,131 +43,54 @@ DIM       = (150, 156, 168)
 HILITE    = (255, 240, 150)
 
 # ---------------------------------------------------------------------------
-# 2. THE MAP  — regions roughly placed like Westeros, north at the top
+# 2. MAP / COMBAT / AI / WIN-LOSE  — see got/core.py
 # ---------------------------------------------------------------------------
-# Each region: a name, screen position, who owns it, its garrison strength,
-# and the names of the regions it borders (you can only attack neighbours).
-
-def new_regions():
-    data = [
-        # name           x    y   owner        army  neighbours
-        ("The North",    210,  80, "Stark",      6, ["The Vale", "Riverlands", "Iron Islands"]),
-        ("Iron Islands", 100, 210, None,         3, ["The North", "Riverlands", "Westerlands"]),
-        ("The Vale",     360, 150, None,         3, ["The North", "Riverlands"]),
-        ("Riverlands",   240, 250, None,         3, ["The North", "The Vale", "Iron Islands",
-                                                     "Westerlands", "Crownlands", "The Reach"]),
-        ("Westerlands",  140, 350, "Lannister",  6, ["Iron Islands", "Riverlands", "The Reach"]),
-        ("Crownlands",   380, 320, "Baratheon",  6, ["Riverlands", "The Reach", "Stormlands",
-                                                     "Dragonstone"]),
-        ("The Reach",    210, 450, "Tyrell",     6, ["Westerlands", "Riverlands", "Crownlands",
-                                                     "Stormlands", "Dorne"]),
-        ("Stormlands",   400, 460, "Baratheon",  5, ["The Reach", "Crownlands", "Dorne"]),
-        ("Dragonstone",  500, 300, "Targaryen",  6, ["Crownlands"]),
-        ("Dorne",        300, 590, None,         3, ["The Reach", "Stormlands"]),
-    ]
-    regions = {}
-    for name, x, y, owner, army, nbrs in data:
-        regions[name] = {"name": name, "pos": (x, y), "owner": owner,
-                         "army": army, "neighbours": nbrs}
-    return regions
-
-def houses_alive(regions):
-    return {r["owner"] for r in regions.values() if r["owner"] is not None}
-
-def regions_of(regions, house):
-    return [r for r in regions.values() if r["owner"] == house]
-
-def is_border(regions, region):
-    """A region is a border if any neighbour is owned by someone else."""
-    return any(regions[n]["owner"] != region["owner"] for n in region["neighbours"])
+# The pure game logic (new_regions, houses_alive, regions_of, is_border,
+# owner_house, resolve_battle, ai_house_turn, throne_target, check_end) lives in
+# got/core.py; the House roster lives in got/houses/. This module keeps only the
+# pygame front-end: drawing, input, screens, and the main loop.
 
 # ---------------------------------------------------------------------------
-# 3. COMBAT  — the same idea as the text version: strength + a little luck
-# ---------------------------------------------------------------------------
-
-def resolve_battle(regions, src, tgt):
-    attack  = src["army"] * random.uniform(0.7, 1.3)
-    defend  = tgt["army"] * random.uniform(0.7, 1.3)
-    if attack > defend:
-        moved = max(1, src["army"] // 2)   # half the host marches into the new land
-        tgt["owner"] = src["owner"]
-        tgt["army"]  = moved
-        src["army"] -= moved
-        return f"{src['owner']} takes {tgt['name']}!"
-    else:
-        src["army"] = max(1, src["army"] - 2)
-        tgt["army"] = max(1, tgt["army"] - 1)
-        return f"{tgt['name']} holds against {src['owner']}."
-
-# ---------------------------------------------------------------------------
-# 4. THE ENEMY BRAIN  — one turn for one AI house (utility AI, no ML)
-# ---------------------------------------------------------------------------
-
-def ai_house_turn(regions, house, log):
-    mine = regions_of(regions, house)
-    if not mine:
-        return
-    # Reinforce: pour new troops into the strongest border region.
-    reinforcements = max(2, len(mine))
-    borders = [r for r in mine if is_border(regions, r)] or mine
-    strongpoint = max(borders, key=lambda r: r["army"])
-    strongpoint["army"] += reinforcements
-
-    # Attack: from each region, hit the weakest neighbour we can likely beat.
-    for r in sorted(mine, key=lambda r: r["army"], reverse=True):
-        if r["army"] < 4:
-            continue
-        enemies = [regions[n] for n in r["neighbours"]
-                   if regions[n]["owner"] != house]
-        if not enemies:
-            continue
-        target = min(enemies, key=lambda e: e["army"])
-        if r["army"] > target["army"] * 1.15:      # only if confident
-            log.append(ai_prefix(resolve_battle(regions, r, target)))
-
-def ai_prefix(msg):
-    return "  " + msg
-
-# ---------------------------------------------------------------------------
-# 5. DRAWING
+# 3. DRAWING
 # ---------------------------------------------------------------------------
 
 def draw_region(screen, font, region, selected, reachable):
-    x, y = region["pos"]
-    color = HOUSE_COLORS[region["owner"]]
+    x, y = region.pos
+    house = owner_house(region, HOUSES)
+    color = house.banner_color if house else NEUTRAL_COLOR
     radius = 34
     # ---- To use REAL ART later: instead of this circle, blit a sprite here,
-    # ---- e.g.  screen.blit(house_banner_image[region["owner"]], (x-32, y-32))
+    # ---- e.g.  screen.blit(house_banner_image[region.owner], (x-32, y-32))
     pygame.draw.circle(screen, color, (x, y), radius)
     ring = HILITE if selected else (WHITE if reachable else (0, 0, 0))
     pygame.draw.circle(screen, ring, (x, y), radius, 3 if (selected or reachable) else 2)
 
     # region name above, army count in the middle
-    label = font.render(region["name"], True, WHITE)
+    label = font.render(region.name, True, WHITE)
     screen.blit(label, (x - label.get_width() // 2, y - radius - 18))
     # dark text on the pale yellow Baratheon banner so it stays readable
-    num_color = (20, 20, 20) if region["owner"] in ("Baratheon", "Stark") else WHITE
-    num = font.render(str(region["army"]), True, num_color)
+    num_color = (20, 20, 20) if region.owner in ("Baratheon", "Stark") else WHITE
+    num = font.render(str(region.army), True, num_color)
     screen.blit(num, (x - num.get_width() // 2, y - num.get_height() // 2))
 
 def draw_map(screen, font, regions, selected, reachable_names):
     drawn = set()
     for r in regions.values():                       # roads first, under the circles
-        for n in r["neighbours"]:
-            edge = frozenset({r["name"], n})
+        for n in r.neighbours:
+            edge = frozenset({r.name, n})
             if edge not in drawn:
-                pygame.draw.line(screen, ROAD, r["pos"], regions[n]["pos"], 3)
+                pygame.draw.line(screen, ROAD, r.pos, regions[n].pos, 3)
                 drawn.add(edge)
     for r in regions.values():
         draw_region(screen, font, r,
-                    selected == r["name"],
-                    r["name"] in reachable_names)
+                    selected == r.name,
+                    r.name in reachable_names)
 
 def draw_panel(screen, big, font, small, regions, player, phase, pool, log):
     px = MAP_W
     pygame.draw.rect(screen, PANEL_BG, (px, 0, WIDTH - px, HEIGHT))
     y = 24
-    title = big.render(f"House {player}", True, HOUSE_COLORS[player])
+    title = big.render(f"House {player}", True, HOUSES[player].banner_color)
     screen.blit(title, (px + 24, y)); y += 46
 
     owned = len(regions_of(regions, player))
@@ -199,35 +122,18 @@ def draw_panel(screen, big, font, small, regions, player, phase, pool, log):
     return btn
 
 # ---------------------------------------------------------------------------
-# 6. WIN / LOSE
-# ---------------------------------------------------------------------------
-
-def throne_target(regions):
-    import math
-    return math.ceil(0.6 * len(regions))
-
-def check_end(regions, player):
-    alive = houses_alive(regions)
-    if player not in alive:
-        return ("lose", None)
-    for h in alive:
-        if len(regions_of(regions, h)) >= throne_target(regions):
-            return ("win" if h == player else "lose", h)
-    return (None, None)
-
-# ---------------------------------------------------------------------------
-# 7. SCREENS
+# 4. SCREENS
 # ---------------------------------------------------------------------------
 
 def region_at(regions, pos):
     for r in regions.values():
-        dx, dy = pos[0] - r["pos"][0], pos[1] - r["pos"][1]
+        dx, dy = pos[0] - r.pos[0], pos[1] - r.pos[1]
         if dx * dx + dy * dy <= 34 * 34:
             return r
     return None
 
 def choose_house_screen(screen, big, font):
-    houses = [h for h in HOUSE_COLORS if h is not None]
+    houses = list(HOUSES)
     buttons = []
     while True:
         screen.fill(BG)
@@ -236,7 +142,7 @@ def choose_house_screen(screen, big, font):
         buttons = []
         for i, h in enumerate(houses):
             rect = pygame.Rect(WIDTH // 2 - 150, 200 + i * 70, 300, 54)
-            pygame.draw.rect(screen, HOUSE_COLORS[h], rect, border_radius=8)
+            pygame.draw.rect(screen, HOUSES[h].banner_color, rect, border_radius=8)
             label = big.render(h, True, (15, 15, 15) if h in ("Baratheon", "Stark") else WHITE)
             screen.blit(label, (rect.centerx - label.get_width() // 2,
                                 rect.centery - label.get_height() // 2))
@@ -267,7 +173,7 @@ def end_screen(screen, big, result, who):
                 pygame.quit(); sys.exit()
 
 # ---------------------------------------------------------------------------
-# 8. MAIN GAME LOOP
+# 5. MAIN GAME LOOP
 # ---------------------------------------------------------------------------
 
 def main():
@@ -292,8 +198,8 @@ def main():
         # ---- what can the player currently click as a valid target? (for glow)
         reachable = set()
         if phase == "attack" and selected:
-            for n in regions[selected]["neighbours"]:
-                if regions[n]["owner"] != player:
+            for n in regions[selected].neighbours:
+                if regions[n].owner != player:
                     reachable.add(n)
 
         # ---- draw everything
@@ -331,16 +237,16 @@ def main():
                     continue
 
                 if phase == "reinforce":
-                    if clicked["owner"] == player and pool > 0:
-                        clicked["army"] += 1
+                    if clicked.owner == player and pool > 0:
+                        clicked.army += 1
                         pool -= 1
                         if pool == 0:
                             phase = "attack"
                 elif phase == "attack":
-                    if clicked["owner"] == player and clicked["army"] > 1:
-                        selected = clicked["name"]          # pick the attacking region
-                    elif selected and clicked["name"] in regions[selected]["neighbours"] \
-                            and clicked["owner"] != player:
+                    if clicked.owner == player and clicked.army > 1:
+                        selected = clicked.name             # pick the attacking region
+                    elif selected and clicked.name in regions[selected].neighbours \
+                            and clicked.owner != player:
                         log.append(resolve_battle(regions, regions[selected], clicked))
                         result, who = check_end(regions, player)
                         if result:
