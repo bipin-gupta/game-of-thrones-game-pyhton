@@ -18,10 +18,16 @@ import sys
 import pygame
 
 from got.core import (
-    new_regions, houses_alive, regions_of, is_border, owner_house,
+    new_regions, houses_alive, regions_of, is_border, link_houses,
     resolve_battle, ai_house_turn, throne_target, check_end,
 )
 from got.houses import make_houses, NEUTRAL_COLOR
+
+
+def is_light(color):
+    """True for pale banners that need dark text drawn over them."""
+    return sum(color) > 400
+
 
 # ---------------------------------------------------------------------------
 # 1. LOOK & FEEL
@@ -32,7 +38,8 @@ MAP_W = 640                      # the map fills the left side; panel on the rig
 FPS = 30
 
 # the five great houses (name -> House); each House carries its banner colour.
-# A territory names its owner; owner_house(region, HOUSES) resolves it to the House.
+# A territory names its owner; link_houses() then hangs the matching House off
+# each region so the front-end can read banner colour straight from region.house.
 HOUSES = make_houses()
 
 BG        = (26, 30, 42)
@@ -56,7 +63,7 @@ HILITE    = (255, 240, 150)
 
 def draw_region(screen, font, region, selected, reachable):
     x, y = region.pos
-    house = owner_house(region, HOUSES)
+    house = region.house                      # set once by link_houses()
     color = house.banner_color if house else NEUTRAL_COLOR
     radius = 34
     # ---- To use REAL ART later: instead of this circle, blit a sprite here,
@@ -68,8 +75,8 @@ def draw_region(screen, font, region, selected, reachable):
     # region name above, army count in the middle
     label = font.render(region.name, True, WHITE)
     screen.blit(label, (x - label.get_width() // 2, y - radius - 18))
-    # dark text on the pale yellow Baratheon banner so it stays readable
-    num_color = (20, 20, 20) if region.owner in ("Baratheon", "Stark") else WHITE
+    # dark text on pale banners (e.g. Baratheon gold, Stark grey) so it stays readable
+    num_color = (20, 20, 20) if house and is_light(house.banner_color) else WHITE
     num = font.render(str(region.army), True, num_color)
     screen.blit(num, (x - num.get_width() // 2, y - num.get_height() // 2))
 
@@ -143,7 +150,8 @@ def choose_house_screen(screen, big, font):
         for i, h in enumerate(houses):
             rect = pygame.Rect(WIDTH // 2 - 150, 200 + i * 70, 300, 54)
             pygame.draw.rect(screen, HOUSES[h].banner_color, rect, border_radius=8)
-            label = big.render(h, True, (15, 15, 15) if h in ("Baratheon", "Stark") else WHITE)
+            label_col = (15, 15, 15) if is_light(HOUSES[h].banner_color) else WHITE
+            label = big.render(h, True, label_col)
             screen.blit(label, (rect.centerx - label.get_width() // 2,
                                 rect.centery - label.get_height() // 2))
             buttons.append((rect, h))
@@ -187,6 +195,7 @@ def main():
 
     player = choose_house_screen(screen, big, font)
     regions = new_regions()
+    link_houses(regions, HOUSES)        # each territory now points at its owning House
     log = [f"House {player} rises. The game begins."]
 
     phase = "reinforce"

@@ -61,6 +61,19 @@ def owner_house(region, houses):
     return houses.get(region.owner)
 
 
+def link_houses(regions, houses):
+    """Point every region at the House object that owns it (or None).
+
+    ``owner`` (a name) stays the source of truth; this just caches the
+    matching House on ``region.house`` so front-ends can read a territory's
+    banner colour and resources straight off the region. Combat keeps the
+    reference in step when land changes hands.
+    """
+    for r in regions.values():
+        r.house = owner_house(r, houses)
+    return regions
+
+
 def is_border(regions, region):
     """A region is a border if any neighbour is owned by someone else."""
     return any(regions[n].owner != region.owner for n in region.neighbours)
@@ -77,6 +90,7 @@ def resolve_battle(regions, src, tgt):
     if attack > defend:
         moved = max(1, src.army // 2)   # half the host marches into the new land
         tgt.owner = src.owner
+        tgt.house = src.house           # the conquering House now holds it too
         tgt.army  = moved
         src.army -= moved
         return f"{src.owner} takes {tgt.name}!"
