@@ -20,6 +20,7 @@ import pygame
 from got.core import (
     new_regions, houses_alive, regions_of, is_border, link_houses,
     resolve_battle, ai_house_turn, throne_target, check_end,
+    collect_income, REINFORCE_COST, GOLD_PER_TERRITORY,
 )
 from got.houses import make_houses, NEUTRAL_COLOR
 
@@ -47,30 +48,47 @@ PANEL_BG  = (18, 21, 30)
 ROAD      = (70, 78, 96)
 WHITE     = (235, 238, 245)
 DIM       = (150, 156, 168)
-HILITE    = (255, 240, 150)
+HILITE    = (255, 240, 150)   # gold ring: the region chosen as an attack source
+INSPECT   = (120, 200, 255)   # blue ring: the region currently shown in the info panel
 
 # ---------------------------------------------------------------------------
-# 2. MAP / COMBAT / AI / WIN-LOSE  — see got/core.py
+# 2. MAP / COMBAT / ECONOMY / AI / WIN-LOSE  — see got/core.py
 # ---------------------------------------------------------------------------
 # The pure game logic (new_regions, houses_alive, regions_of, is_border,
-# owner_house, resolve_battle, ai_house_turn, throne_target, check_end) lives in
-# got/core.py; the House roster lives in got/houses/. This module keeps only the
-# pygame front-end: drawing, input, screens, and the main loop.
+# owner_house, collect_income, resolve_battle, ai_house_turn, throne_target,
+# check_end) lives in got/core.py; the House roster lives in got/houses/. This
+# module keeps only the pygame front-end: drawing, input, screens, and the
+# main loop.
 
 # ---------------------------------------------------------------------------
 # 3. DRAWING
 # ---------------------------------------------------------------------------
 
-def draw_region(screen, font, region, selected, reachable):
+def draw_region(screen, font, region, selected, inspected, reachable):
     x, y = region.pos
     house = region.house                      # set once by link_houses()
     color = house.banner_color if house else NEUTRAL_COLOR
     radius = 34
     # ---- To use REAL ART later: instead of this circle, blit a sprite here,
     # ---- e.g.  screen.blit(house_banner_image[region.owner], (x-32, y-32))
+
+    # a soft outer glow marks whichever region is the attack source or is
+    # currently being inspected, so it stays readable at a glance on the map
+    if selected:
+        pygame.draw.circle(screen, HILITE, (x, y), radius + 6, 2)
+    elif inspected:
+        pygame.draw.circle(screen, INSPECT, (x, y), radius + 5, 1)
+
     pygame.draw.circle(screen, color, (x, y), radius)
-    ring = HILITE if selected else (WHITE if reachable else (0, 0, 0))
-    pygame.draw.circle(screen, ring, (x, y), radius, 3 if (selected or reachable) else 2)
+    if selected:
+        ring, width = HILITE, 4
+    elif reachable:
+        ring, width = WHITE, 3
+    elif inspected:
+        ring, width = INSPECT, 3
+    else:
+        ring, width = (0, 0, 0), 2
+    pygame.draw.circle(screen, ring, (x, y), radius, width)
 
     # region name above, army count in the middle
     label = font.render(region.name, True, WHITE)
@@ -80,7 +98,7 @@ def draw_region(screen, font, region, selected, reachable):
     num = font.render(str(region.army), True, num_color)
     screen.blit(num, (x - num.get_width() // 2, y - num.get_height() // 2))
 
-def draw_map(screen, font, regions, selected, reachable_names):
+def draw_map(screen, font, regions, selected, inspected, reachable_names):
     drawn = set()
     for r in regions.values():                       # roads first, under the circles
         for n in r.neighbours:
@@ -91,9 +109,51 @@ def draw_map(screen, font, regions, selected, reachable_names):
     for r in regions.values():
         draw_region(screen, font, r,
                     selected == r.name,
+                    inspected == r.name,
                     r.name in reachable_names)
 
-def draw_panel(screen, big, font, small, regions, player, phase, pool, log):
+def wrap_text(text, max_chars):
+    """Greedy word-wrap into lines no longer than max_chars."""
+    words = text.split(" ")
+    lines, cur = [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if len(trial) > max_chars and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    return lines
+
+def draw_territory_info(screen, font, small, regions, inspected, x, y):
+    """The clicked territory's details: name, owner, army, income, neighbours."""
+    screen.blit(font.render("Territory", True, WHITE), (x, y)); y += 24
+    region = regions.get(inspected) if inspected else None
+    if region is None:
+        screen.blit(small.render("Click a territory to inspect it.", True, DIM), (x, y))
+        return y + 32
+
+    name = small.render(region.name, True, WHITE)
+    screen.blit(name, (x, y)); y += 20
+
+    income = GOLD_PER_TERRITORY if region.owner else 0
+    details = [
+        f"Owner: {region.owner or 'Unclaimed'}",
+        f"Army: {region.army}",
+        f"Gold income: {income}/turn",
+    ]
+    for line in details:
+        screen.blit(small.render(line, True, DIM), (x, y)); y += 18
+
+    screen.blit(small.render("Neighbours:", True, DIM), (x, y)); y += 18
+    nbrs = ", ".join(region.neighbours) if region.neighbours else "none"
+    for line in wrap_text(nbrs, 40):
+        screen.blit(small.render(line, True, DIM), (x, y)); y += 16
+    return y + 14
+
+def draw_panel(screen, big, font, small, regions, player, phase, pool, log, inspected):
     px = MAP_W
     pygame.draw.rect(screen, PANEL_BG, (px, 0, WIDTH - px, HEIGHT))
     y = 24
@@ -103,12 +163,14 @@ def draw_panel(screen, big, font, small, regions, player, phase, pool, log):
     owned = len(regions_of(regions, player))
     total = len(regions)
     screen.blit(font.render(f"Regions: {owned} / {total}", True, WHITE), (px + 24, y)); y += 26
+    screen.blit(font.render(f"Gold: {HOUSES[player].gold}", True, HILITE), (px + 24, y)); y += 26
     screen.blit(font.render(f"Throne needs: {throne_target(regions)}", True, DIM), (px + 24, y)); y += 34
 
     # whose turn / what to do
     if phase == "reinforce":
         screen.blit(font.render(f"REINFORCE  ({pool} left)", True, HILITE), (px + 24, y)); y += 24
-        screen.blit(small.render("Click your regions to add troops.", True, DIM), (px + 24, y)); y += 20
+        screen.blit(small.render(f"Click your regions to add troops ({REINFORCE_COST} gold each).",
+                                  True, DIM), (px + 24, y)); y += 20
     else:
         screen.blit(font.render("ATTACK", True, HILITE), (px + 24, y)); y += 24
         screen.blit(small.render("Click a region, then a neighbour to attack.", True, DIM), (px + 24, y)); y += 20
@@ -122,9 +184,13 @@ def draw_panel(screen, big, font, small, regions, player, phase, pool, log):
     screen.blit(t, (btn.centerx - t.get_width() // 2, btn.centery - t.get_height() // 2))
     y += 58
 
-    # message log
+    # the currently clicked territory's details
+    y = draw_territory_info(screen, font, small, regions, inspected, px + 24, y)
+
+    # message log — however many lines still fit below the territory panel
     screen.blit(font.render("Chronicle:", True, WHITE), (px + 24, y)); y += 24
-    for line in log[-11:]:
+    max_lines = max(3, (HEIGHT - y - 16) // 18)
+    for line in log[-max_lines:]:
         screen.blit(small.render(line[:42], True, DIM), (px + 24, y)); y += 18
     return btn
 
@@ -196,11 +262,14 @@ def main():
     player = choose_house_screen(screen, big, font)
     regions = new_regions()
     link_houses(regions, HOUSES)        # each territory now points at its owning House
-    log = [f"House {player} rises. The game begins."]
+    income = collect_income(regions, HOUSES, player)
+    log = [f"House {player} rises. The game begins.",
+           f"You collect {income} gold from your lands."]
 
     phase = "reinforce"
     pool = max(2, len(regions_of(regions, player)))
     selected = None                    # region name chosen as attack source
+    inspected = None                   # region name shown in the info panel
 
     running = True
     while running:
@@ -213,8 +282,8 @@ def main():
 
         # ---- draw everything
         screen.fill(BG)
-        draw_map(screen, font, regions, selected, reachable)
-        button = draw_panel(screen, big, font, small, regions, player, phase, pool, log)
+        draw_map(screen, font, regions, selected, inspected, reachable)
+        button = draw_panel(screen, big, font, small, regions, player, phase, pool, log, inspected)
         pygame.display.flip()
         clock.tick(FPS)
 
@@ -231,11 +300,14 @@ def main():
                         # ---- run every other house's turn
                         log.append("— The other houses move —")
                         for h in [x for x in houses_alive(regions) if x != player]:
+                            collect_income(regions, HOUSES, h)
                             ai_house_turn(regions, h, log)
                         result, who = check_end(regions, player)
                         if result:
                             end_screen(screen, big, result, who)
                         # ---- start the player's next turn
+                        income = collect_income(regions, HOUSES, player)
+                        log.append(f"House {player} collects {income} gold from its lands.")
                         phase = "reinforce"
                         pool = max(2, len(regions_of(regions, player)))
                         selected = None
@@ -243,12 +315,15 @@ def main():
 
                 clicked = region_at(regions, e.pos)
                 if not clicked:
-                    continue
+                    continue                            # empty area: do nothing
+
+                inspected = clicked.name                # any click also updates the info panel
 
                 if phase == "reinforce":
-                    if clicked.owner == player and pool > 0:
+                    if clicked.owner == player and pool > 0 and HOUSES[player].gold >= REINFORCE_COST:
                         clicked.army += 1
                         pool -= 1
+                        HOUSES[player].gold -= REINFORCE_COST
                         if pool == 0:
                             phase = "attack"
                 elif phase == "attack":

@@ -80,6 +80,29 @@ def is_border(regions, region):
 
 
 # ---------------------------------------------------------------------------
+# ECONOMY  — a small per-territory gold trickle, spent on reinforcements
+# ---------------------------------------------------------------------------
+
+GOLD_PER_TERRITORY = 2   # income each held region produces at turn start
+REINFORCE_COST = 1       # gold spent per point of army added while reinforcing
+
+
+def territory_income(regions, house):
+    """Gold a house would collect this turn from the territories it holds."""
+    return len(regions_of(regions, house)) * GOLD_PER_TERRITORY
+
+
+def collect_income(regions, houses, house):
+    """Add this turn's territory income to a house's treasury; return the amount."""
+    house_obj = houses.get(house)
+    if house_obj is None:
+        return 0
+    amount = territory_income(regions, house)
+    house_obj.gold += amount
+    return amount
+
+
+# ---------------------------------------------------------------------------
 # COMBAT  — strength + a little luck
 # ---------------------------------------------------------------------------
 
